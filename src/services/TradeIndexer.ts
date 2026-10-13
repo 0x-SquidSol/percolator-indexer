@@ -7,7 +7,7 @@ import { config, getConnection, eventBus, decodeBase58, withRetry, createLogger,
 import { getMarketRowsCached, type MarketRowLite } from "../db/marketRows.js";
 import { unwrapEvictAndTradeIx } from "../parsers/evictTrade.js";
 import { isBlockedSlab } from "../blocklist.js";
-import { insertTradeRow } from "../db/insertTradeRow.js";
+import { insertTradeRow, type TradeSizeProvenance } from "../db/insertTradeRow.js";
 import { recordV22LogEvents } from "./v22LogEvents.js";
 import { rawInstructionsFromParsedTx } from "../parsers/v22Events.js";
 import {
@@ -667,6 +667,7 @@ export class TradeIndexerPolling {
             if (fillAlreadyStored(await getStored(), { slab: slabAddress, assetIndex: leg.assetIndex, legIndex, trader, side: leg.side, size: leg.sizeValue.toString(), ordinal }, reduceLegs)) continue;
           }
           let legSize = leg.sizeValue;
+          let sizeProvenance: TradeSizeProvenance = "legacy_unverified";
           let price: number | undefined;
           if (batchCpi) {
             // All-or-nothing per transaction: once one leg needs a retry, write none of its later
@@ -680,6 +681,7 @@ export class TradeIndexerPolling {
             }
             if (r.kind === "fill") {
               legSize = r.sizeValue;
+              sizeProvenance = r.exact ? "matcher_exact" : "matcher_request_upper_bound";
               price = Number(r.priceE6) / 1_000_000;
               if (!r.exact) logger.debug("TradeCpi executed size unverified: wrote the matcher-requested size (upper bound)", { signature: signature.slice(0, 12) });
             } // "legacy": wire size + the existing price logic, exactly as before this parser
@@ -692,6 +694,7 @@ export class TradeIndexerPolling {
             trader,
             side: leg.side,
             size: legSize.toString(),
+            size_provenance: sizeProvenance,
             price,
             fee,
             tx_signature: signature,
@@ -710,6 +713,7 @@ export class TradeIndexerPolling {
       const decoded = decodeV18SingleFill(tag, data);
       if (!decoded) continue;
       let { sizeValue } = decoded;
+      let sizeProvenance: TradeSizeProvenance = "legacy_unverified";
       const { side } = decoded;
       const legIndex = fillSeq++;
 
@@ -747,6 +751,7 @@ export class TradeIndexerPolling {
         }
         if (r.kind === "fill") {
           sizeValue = r.sizeValue;
+          sizeProvenance = r.exact ? "matcher_exact" : "matcher_request_upper_bound";
           price = Number(r.priceE6) / 1_000_000;
           if (!r.exact) logger.debug("TradeCpi executed size unverified: wrote the matcher-requested size (upper bound)", { signature: signature.slice(0, 12) });
         } // "legacy": wire size + the existing price logic, exactly as before this parser
@@ -780,6 +785,7 @@ export class TradeIndexerPolling {
         trader,
         side,
         size: sizeValue.toString(),
+        size_provenance: sizeProvenance,
         price,
         fee,
         tx_signature: signature,
