@@ -15,7 +15,7 @@ ALTER TABLE public.trades
       'matcher_request_upper_bound',
       'legacy_unverified'
     )
-  );
+  ) NOT VALID;
 
 COMMENT ON COLUMN public.trades.size_provenance IS
   'Evidence quality of indexed trade size; NULL means unknown or not applicable.';
