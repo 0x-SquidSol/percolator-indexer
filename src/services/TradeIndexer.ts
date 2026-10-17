@@ -644,10 +644,11 @@ export class TradeIndexerPolling {
 
         // H2/H3: each leg is deduped per-leg by 23505 (see above), never per tx.
 
-        // #205: fall back to the slab read only when the leg itself doesn't carry
-        // a wire exec_price (BatchTradeCpi legs never do — see decodeV18BatchLegs).
-        const resolvePrice = async (leg: (typeof legs)[number]): Promise<number> =>
-          leg.execPriceE6 !== undefined ? Number(leg.execPriceE6) / 1_000_000 : resolveFallbackPrice(leg.assetIndex);
+        // S3 audit 2026-10-17: a BatchTradeNoCpi leg's wire exec_price is caller-chosen and NOT the
+        // booked price (the wrapper books every fill at the asset's effective_price, F-TRADENOCPI-FEE;
+        // its own fill event marks exec_price `quoted_price_e6`, untrusted). Price every leg from the
+        // asset's effective_price instead, like the CPI and event-stream paths.
+        const resolvePrice = async (leg: (typeof legs)[number]): Promise<number> => resolveFallbackPrice(leg.assetIndex);
 
         const i128Max = (1n << 127n) - 1n;
 
@@ -727,13 +728,11 @@ export class TradeIndexerPolling {
         }
       }
 
-      // #205: TradeNoCpi carries the actual fill price on the wire (exec_price) —
-      // authoritative and RPC-free. TradeCpi doesn't (only limit_price, the
-      // requested cap), so it still falls back to the slab read.
+      // S3 audit 2026-10-17: TradeNoCpi's wire exec_price is chosen by the two signers and is NOT the
+      // booked price (the wrapper books at the asset's effective_price, F-TRADENOCPI-FEE). It is never
+      // used as the trade price: NoCpi falls through to the effective_price read below.
       let price: number | undefined;
-      if (decoded.execPriceE6 !== undefined) {
-        price = Number(decoded.execPriceE6) / 1_000_000;
-      } else if (tag === IX_TAG.TradeCpi) {
+      if (tag === IX_TAG.TradeCpi) {
         if (retryNeeded) continue; // all-or-nothing per transaction (see the batch branch)
         // #213/#221: executed size + booked price from the matcher call, never the request/mark.
         const r = await resolveCpiLeg({

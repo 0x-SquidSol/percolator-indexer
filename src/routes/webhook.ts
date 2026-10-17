@@ -831,8 +831,8 @@ async function extractTradesFromEnhancedTx(
     // matched), which is why decodeV18SingleFill takes the tag.
     const isBatch = (tag === IX_TAG.BatchTradeNoCpi || tag === IX_TAG.BatchTradeCpi);
     // H2/H3: capture asset_index + leg_index so batch legs dedupe on the composite key.
-    // #205: feeBps/execPriceE6 carried through from the decoder — see there for
-    // which variants carry a real execPriceE6 (only *NoCpi).
+    // #205: feeBps carried through from the decoder. execPriceE6 is decoded but NOT used as the
+    // trade price (caller-chosen; see the price block below).
     const legs: { sizeValue: bigint; side: "long" | "short"; assetIndex: number; legIndex: number; feeBps?: number; execPriceE6?: bigint }[] = isBatch
       ? decodeV18BatchLegs(tag, data)
       : (() => {
@@ -866,7 +866,7 @@ async function extractTradesFromEnhancedTx(
     }
 
     // #205: resolve the account/RPC fallback price at most once per instruction
-    // (not once per leg) — only legs without a wire execPriceE6 need it.
+    // (not once per leg).
     // #221: per ASSET (a batch can carry legs on different assets); the fallback is that asset's
     // booked effective_price.
     const fallbackPriceByAsset = new Map<number, number>();
@@ -931,16 +931,16 @@ async function extractTradesFromEnhancedTx(
         } // "legacy": wire size + the existing price logic below, exactly as before this parser
       }
       if (price === undefined) {
-        if (leg.execPriceE6 !== undefined) {
-          price = Number(leg.execPriceE6) / 1_000_000;
-        } else {
-          let fallback = fallbackPriceByAsset.get(leg.assetIndex);
-          if (fallback === undefined) {
-            fallback = await extractPriceWithinDeadline(tx, slabAddress, leg.assetIndex, delivery.ctxDeadlineAt, signature);
-            fallbackPriceByAsset.set(leg.assetIndex, fallback);
-          }
-          price = fallback;
+        // S3 audit 2026-10-17: never the wire exec_price of a (Batch)TradeNoCpi. Both signers choose it
+        // freely and the wrapper books the fill at the asset's effective_price instead (F-TRADENOCPI-FEE;
+        // the wrapper's own fill event calls it `quoted_price_e6`, untrusted), so trusting it let a
+        // self-trade write any price into trades -> candles, leaderboard and trader volume.
+        let fallback = fallbackPriceByAsset.get(leg.assetIndex);
+        if (fallback === undefined) {
+          fallback = await extractPriceWithinDeadline(tx, slabAddress, leg.assetIndex, delivery.ctxDeadlineAt, signature);
+          fallbackPriceByAsset.set(leg.assetIndex, fallback);
         }
+        price = fallback;
       }
       const fee = computeFeeUsd(legSize, price, leg.feeBps);
 

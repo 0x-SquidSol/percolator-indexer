@@ -748,6 +748,32 @@ describe('TradeIndexerPolling', () => {
       expect(mockGetAccountInfo).toHaveBeenCalledTimes(1);
       expect(vi.mocked(readAssetEffectivePriceE6).mock.calls.map((c) => c[1])).toEqual([0]);
     }, 10000);
+
+    it('S3 audit: ignores a caller-chosen TradeNoCpi wire exec_price and stores the booked effective_price', async () => {
+      // The two signers of a TradeNoCpi pick exec_price freely; the wrapper books the fill at the
+      // asset's effective_price (F-TRADENOCPI-FEE). A self-trade declaring exec_price = 1 (1e-6 USD)
+      // must not write that price into trades (candles / leaderboard / trader volume).
+      vi.mocked(shared.getMarkets).mockResolvedValue([{ slab_address: SLAB } as any]);
+      vi.mocked(shared.decodeBase58).mockImplementation(() => {
+        const d = tradeCpiData();
+        new DataView(d.buffer).setBigUint64(59, 1n, true); // attacker exec_price
+        return d;
+      });
+      mockGetSignaturesForAddress.mockResolvedValue([{ signature: VALID_SIG, err: null }]);
+      mockGetParsedTransaction.mockResolvedValue({
+        meta: { err: null, logMessages: [] },
+        transaction: { message: { instructions: [ix('l0')] } },
+      });
+      mockGetAccountInfo.mockImplementation(async () => ({ data: Buffer.alloc(64) }) as any);
+      vi.mocked(readAssetEffectivePriceE6).mockImplementation(() => 13_614_586);
+
+      indexer.start();
+      await new Promise(r => setTimeout(r, 6500));
+
+      const rows = vi.mocked(insertTradeRow).mock.calls.map((c) => c[0] as any);
+      expect(rows).toHaveLength(1);
+      expect(rows[0].price).toBe(13.614586);
+    }, 10000);
   });
 
   describe('split order — per-leg dedup, no transaction-level gate', () => {

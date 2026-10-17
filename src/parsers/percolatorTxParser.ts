@@ -69,10 +69,10 @@ const V18_SINGLE_FEE_BPS_OFF = 67;
 const V18_SINGLE_FEE_BPS_END = V18_SINGLE_FEE_BPS_OFF + 8; // 75
 
 /**
- * #205 — only TradeNoCpi carries the actual fill price on the wire
- * (exec_price@59); TradeCpi only carries `limit_price` (the requested cap,
- * not what the fill executed at) — see the layout doc above `decodeV18SingleFill`.
- * Callers must resolve TradeCpi's price from slab state, same as before.
+ * #205 — TradeNoCpi carries a caller-chosen exec_price@59; TradeCpi only carries
+ * `limit_price`. NEITHER is the booked fill price (the wrapper books at the asset's
+ * effective_price, F-TRADENOCPI-FEE): callers resolve every price from slab state
+ * or the matcher CPI (S3 audit 2026-10-17).
  */
 const V18_SINGLE_EXEC_PRICE_OFF: Partial<Record<number, number>> = {
   [IX_TAG.TradeNoCpi]: 59,
@@ -119,11 +119,12 @@ export interface DecodedFill {
    */
   feeBps?: number;
   /**
-   * #205 — the actual fill price (u64, e6-scaled USD), present ONLY for
-   * TradeNoCpi / BatchTradeNoCpi legs. TradeCpi/BatchTradeCpi never carry it
-   * (only `limit_price`, the requested cap) — `undefined` there, not a
-   * missing-data case. A wire value of exactly 0 is treated as absent (no
-   * legitimate fill executes at $0).
+   * The CALLER-CHOSEN exec_price (u64, e6) of a TradeNoCpi / BatchTradeNoCpi leg;
+   * `undefined` for TradeCpi/BatchTradeCpi (only `limit_price` there) or a wire 0.
+   * UNTRUSTED and NOT the fill price: the wrapper books every fill at the asset's
+   * effective_price (percolator-prog F-TRADENOCPI-FEE) and its own fill event names
+   * this value `quoted_price_e6`. Never store it as a trade's price (S3 audit
+   * 2026-10-17: doing so let a self-trade write any price into `trades`).
    */
   execPriceE6?: bigint;
 }
