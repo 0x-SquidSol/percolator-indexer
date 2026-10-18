@@ -225,7 +225,8 @@ END $$;
 
 GRANT SELECT ON markets, market_stats, oracle_markets TO anon, authenticated;
 -- trades: expose only non-PII trade columns publicly (migration 030 parity).
-GRANT SELECT (trader, size, created_at) ON trades TO anon;
+-- size_provenance qualifies size (exact vs upper bound), so anon sees it too (#228).
+GRANT SELECT (trader, size, size_provenance, created_at) ON trades TO anon;
 GRANT SELECT ON trades TO authenticated;
 GRANT SELECT ON markets_with_stats TO anon, authenticated, service_role;
 
