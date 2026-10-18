@@ -2,6 +2,7 @@ import "dotenv/config";
 import { readFileSync } from "node:fs";
 import { Hono } from "hono";
 import { serve } from "@hono/node-server";
+import { getConnInfo } from "@hono/node-server/conninfo";
 import { config, createLogger, initSentry, captureException, getSupabase, getConnection, sendCriticalAlert, sendInfoAlert, createAtlasWs, type AtlasWs } from "@percolatorct/shared";
 import { MarketDiscovery } from "./services/MarketDiscovery.js";
 import { startDiscovery } from "./services/discoveryWiring.js";
@@ -17,6 +18,7 @@ import { LpVaultIndexer } from "./services/LpVaultIndexer.js";
 import { RpcLpVaultChain } from "./lpVault/chain.js";
 import { SupabaseLpVaultStore } from "./lpVault/store.js";
 import { CURRENT_NETWORK } from "./network.js";
+import { clientIp, trustedProxyDepth } from "./lib/clientIp.js";
 
 // Initialize Sentry first
 initSentry("indexer");
@@ -37,6 +39,8 @@ const IS_PRODUCTION = process.env.NODE_ENV === "production";
 const rateLimitWindowMs = 60_000; // 1 minute
 const rateLimitMaxRequests = 100;
 const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+// Parsed once at boot; an invalid value is logged and falls back to 1.
+const PROXY_DEPTH = trustedProxyDepth(process.env.TRUSTED_PROXY_DEPTH, (msg) => logger.error(msg));
 
 // Simple automatic memory pruning interval every 5 minutes to avoid memory leaks
 setInterval(() => {
@@ -49,16 +53,17 @@ setInterval(() => {
 }, 5 * 60_000);
 
 const rateLimiter = async (c: any, next: any) => {
-  // #149 (INFRA): x-forwarded-for is trusted as-is here.
-  // A client that directly accesses this service can spoof the XFF header and
-  // supply any IP, bypassing the per-IP rate limit. This is acceptable ONLY when
-  // the ingress proxy (Railway / Cloudflare) is configured to:
-  //   1. strip any client-supplied X-Forwarded-For header, AND
-  //   2. append the real client IP before forwarding.
-  // Verify this is enforced in the proxy configuration before relying on this
-  // limiter as a security control. The primary auth guard (HMAC secret) is the
-  // load-bearing protection; this limiter is a secondary DoS mitigation.
-  const ip = c.req.header("x-forwarded-for")?.split(",")[0].trim() || "unknown-ip";
+  // #149 / S3-C11: key on the client IP behind TRUSTED_PROXY_DEPTH proxies (rightmost
+  // X-Forwarded-For hops), never the caller-written leftmost entry. See lib/clientIp.ts.
+  // The primary auth guard (HMAC secret) is the load-bearing protection; this limiter is a
+  // secondary DoS mitigation.
+  let remoteAddress: string | undefined;
+  try {
+    remoteAddress = getConnInfo(c).remote.address;
+  } catch {
+    remoteAddress = undefined;
+  }
+  const ip = clientIp({ header: (n) => c.req.header(n), remoteAddress, depth: PROXY_DEPTH });
   const now = Date.now();
   const data = ipRequestCounts.get(ip);
 
