@@ -33,47 +33,36 @@ const HEALTH_CACHE_TTL_MS = Number(process.env.HEALTH_CACHE_TTL_MS ?? 5000);
 // so this constant only gates the production HTTPS-URL checks.
 const IS_PRODUCTION = process.env.NODE_ENV === "production";
 
-// M-5: IP-based rate limiter middleware for webhook endpoint
-const rateLimitWindowMs = 60_000; // 1 minute
-const rateLimitMaxRequests = 100;
-const ipRequestCounts = new Map<string, { count: number; resetTime: number }>();
+import { createWebhookRateLimiter } from "./lib/webhookRateLimiter.js";
 
-// Simple automatic memory pruning interval every 5 minutes to avoid memory leaks
-setInterval(() => {
-  const now = Date.now();
-  for (const [ip, data] of ipRequestCounts.entries()) {
-    if (now > data.resetTime) {
-      ipRequestCounts.delete(ip);
-    }
-  }
-}, 5 * 60_000);
+/**
+ * Read a positive-integer env var, falling back on anything that is not one.
+ *
+ * Same shape as `TradeIndexer.ts`'s helper, and deliberately NOT `parseInt`:
+ * `parseInt("")` is `NaN`, and a `NaN` budget would silently disable this limiter.
+ */
+function readPositiveIntEnv(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed <= 0) return fallback;
+  return parsed;
+}
 
-const rateLimiter = async (c: any, next: any) => {
-  // #149 (INFRA): x-forwarded-for is trusted as-is here.
-  // A client that directly accesses this service can spoof the XFF header and
-  // supply any IP, bypassing the per-IP rate limit. This is acceptable ONLY when
-  // the ingress proxy (Railway / Cloudflare) is configured to:
-  //   1. strip any client-supplied X-Forwarded-For header, AND
-  //   2. append the real client IP before forwarding.
-  // Verify this is enforced in the proxy configuration before relying on this
-  // limiter as a security control. The primary auth guard (HMAC secret) is the
-  // load-bearing protection; this limiter is a secondary DoS mitigation.
-  const ip = c.req.header("x-forwarded-for")?.split(",")[0].trim() || "unknown-ip";
-  const now = Date.now();
-  const data = ipRequestCounts.get(ip);
+// M-5: IP-based rate limiter for the webhook endpoint.
+// GH#234: lives in `lib/webhookRateLimiter.ts` so it is testable against the real
+// code (this module calls `start()` at scope, so a test cannot import it), and so
+// the check-before / count-after-and-only-if-served rule is documented where it is
+// implemented. The budget default sits above the measured live delivery rate.
+const webhookRateLimiter = createWebhookRateLimiter({
+  maxRequests: readPositiveIntEnv("WEBHOOK_RATE_LIMIT_PER_MIN", 900),
+  windowMs: 60_000,
+  onLimit: ({ ip, count }) => logger.warn("Rate limit exceeded", { ip, count }),
+});
+const rateLimiter = webhookRateLimiter.middleware;
 
-  if (!data || now > data.resetTime) {
-    ipRequestCounts.set(ip, { count: 1, resetTime: now + rateLimitWindowMs });
-  } else {
-    data.count++;
-    if (data.count > rateLimitMaxRequests) {
-      logger.warn("Rate limit exceeded", { ip, count: data.count });
-      c.header("Retry-After", Math.ceil((data.resetTime - now) / 1000).toString());
-      return c.json({ error: "Too many requests, please try again later" }, 429);
-    }
-  }
-  await next();
-};
+// Prune expired buckets every 5 minutes to bound memory.
+setInterval(() => webhookRateLimiter.pruneExpired(), 5 * 60_000);
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return new Promise<T>((resolve, reject) => {
